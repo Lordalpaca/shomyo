@@ -28,8 +28,8 @@
   #bar.on{opacity:1}
   #bar button{padding:8px 16px;font-size:13px}
   #rec.live{background:#c8281e;border-color:#ff8a7a;color:#fff}
-  #hint{position:fixed;left:0;right:0;top:16px;text-align:center;font:13px -apple-system,"Segoe UI",sans-serif;letter-spacing:.06em;
-    color:rgba(246,231,200,.7);pointer-events:none;z-index:2;opacity:0;transition:opacity .6s;padding:0 150px}
+  #hint{position:fixed;left:0;right:0;top:60px;text-align:center;font:13px -apple-system,"Segoe UI",sans-serif;letter-spacing:.06em;
+    color:rgba(246,231,200,.7);pointer-events:none;z-index:2;opacity:0;transition:opacity .6s;padding:0 20px}
   #hint.on{opacity:1}
 </style>
 </head>
@@ -37,7 +37,7 @@
 <canvas id="cv"></canvas>
 <video id="vid" playsinline muted></video>
 <div id="hint"></div>
-<div id="bar"><button id="rec">● Record</button><button id="clear">Silence</button></div>
+<div id="bar"><button id="rec">● Record</button><button id="auto">Auto melody: on</button><button id="swap">Swap hands</button><button id="clear">Silence</button></div>
 
 <div id="start">
   <div class="jp">声明</div>
@@ -95,7 +95,7 @@ const VOW=[[430,800,2600],[640,1100,2500],[320,680,2400],[500,1500,2500]];
 function buildMonks(L){
   const src=gain(1); L.pre=gain(1,L.out);
   [[-34,0,1],[-34,9,1],[-34,-11,1],[-34,5,.8],[-27,-4,.3],[-22,3,.22]].forEach(([s,c,g],i)=>{ const v=gain(g,src), o=osc('sawtooth',N(s),v,c);
-    const lg=gain(7); osc('sine',.06+.045*i,lg); lg.connect(o.detune); });
+    const lg=gain(7); osc('sine',.06+.045*i,lg); lg.connect(o.detune); (L.os=L.os||[]).push({o,s}); });
   L.F=[0,1,2].map(i=>{ const fg=gain([1,.65,.3][i],L.pre), f=filt('bandpass',VOW[0][i],[7,9,11][i],fg); src.connect(f); return f; });
   src.connect(filt('lowpass',210,.7,gain(.55,L.pre)));
   L.wg=gain(0,L.pre); L.wh=filt('bandpass',N(-34)*8,30,L.wg); src.connect(L.wh);
@@ -159,7 +159,42 @@ function tickBowls(L,t){ bowl(t,N(pick([-19,-12,-7,-5,0])),.3,L.out);
 const TICK={monks:tickMonks,horns:tickHorns,sho:tickSho,hichi:tickHichiriki,drums:tickDrums,bowls:tickBowls};
 function tick(){ const now=ac.currentTime;
   LAYERS.forEach(L=>{ if(L.cur<.04){ L.next=Math.max(L.next,now+.15); if(L.id==='hichi'){ L.env.gain.setTargetAtTime(0,now,.2); L.fenv.gain.setTargetAtTime(0,now,.2); } return; }
+    if(now<(L.man||0)||!auto){ L.next=now+.2; if(!auto&&L.id==='hichi'&&!L.playing){ L.env.gain.setTargetAtTime(0,now,.2); L.fenv.gain.setTargetAtTime(0,now,.2); } return; }
     let guard=0; while(L.next<now+.25&&guard++<4) TICK[L.id](L,Math.max(L.next,now+.02)); }); }
+
+// ───────────────────────── playing by hand: the PLAY hand owns the notes ─────────────────────────
+let auto=true, swapHands=false;
+const PSCALE=[-5,-3,0,2,5,7,9,12,14,17], MTR=[-7,-5,-2,0,3,5,7], HORN=[-31,-29,-26,-24,-19], BOWL=[-19,-14,-12,-7,-5,0,5];
+const STEPS={monks:7,horns:5,sho:4,hichi:10,drums:3,bowls:7};
+const hold=(p,t)=>{ if(p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t); else p.cancelScheduledValues(t); };
+function shoHold(t,chord,dest){ return chord.map(s=>{ const f=N(s), lp=filt('lowpass',3600,.5), g=gain(0,dest); lp.connect(g);
+  const a=ac.createOscillator(); a.type='triangle'; a.frequency.value=f; a.connect(lp); const b=ac.createOscillator(), bg=gain(.13,lp); b.type='square'; b.frequency.value=f*1.002; b.connect(bg);
+  g.gain.setTargetAtTime(.05,t,.3); a.start(t); b.start(t); return {g,os:[a,b]}; }); }
+function shoRelease(L,t){ (L.held||[]).forEach(n=>{ hold(n.g.gain,t); n.g.gain.setTargetAtTime(0,t,.4); n.os.forEach(o=>o.stop(t+3)); }); L.held=null; }
+function hornHold(t,dest){ const lp=filt('lowpass',150,1.2), g=gain(0,dest); lp.connect(g);
+  const o=[-9,8].map(d=>{ const x=ac.createOscillator(); x.type='sawtooth'; x.detune.value=d; x.frequency.value=N(-31)*.8; x.connect(lp); x.start(t); return x; });
+  lp.frequency.setValueAtTime(150,t); lp.frequency.exponentialRampToValueAtTime(1900,t+1.2); g.gain.setTargetAtTime(.5,t,.25); return {o,g}; }
+function playStart(L,h,xf){ if(!ac) return; const t=ac.currentTime; L.pi=-1; L.pv=null; L.playing=true; if(L.level<.5) L.level=.6;
+  if(L.id==='hichi'){ [L.env.gain,L.fenv.gain,L.vib.gain].concat(L.o.map(o=>o.frequency)).forEach(p=>hold(p,t));
+    L.env.gain.setTargetAtTime(1,t,.06); L.fenv.gain.setTargetAtTime(.45,t,.1); L.vib.gain.setTargetAtTime(0,t,.05); L.vib.gain.setTargetAtTime(40,t+.5,.8); }
+  if(L.id==='horns') L.hh=hornHold(t,L.out);
+  playMove(L,h,xf,true); }
+function playMove(L,h,xf,first){ if(!ac||!L.playing) return; const t=ac.currentTime, n=STEPS[L.id], pos=h*(n-1), i=Math.round(pos), ch=i!==L.pi; L.pi=i; L.man=t+8; L.ph=h; L.grab=1;
+  switch(L.id){
+    case 'hichi': { const f=N(PSCALE[i]+(pos-i)*.5); L.o.forEach((o,k)=>o.frequency.setTargetAtTime(f*L.mul[k],t,first?.02:.06)); break; }
+    case 'monks': { if(ch){ L.os.forEach(v=>v.o.frequency.setTargetAtTime(N(v.s+MTR[i]),t,.22)); L.wh.frequency.setTargetAtTime(N(-34+MTR[i])*8,t,.3); }
+      const v=VOW[Math.max(0,Math.min(3,Math.floor(xf*4)))]; if(v!==L.pv){ L.pv=v; L.F.forEach((f,k)=>f.frequency.setTargetAtTime(v[k],t,.08)); L.pre.gain.setTargetAtTime(.5,t,.03); L.pre.gain.setTargetAtTime(1,t+.1,.12); } break; }
+    case 'sho': if(ch){ shoRelease(L,t); L.held=shoHold(t,AITAKE[i],L.out); } break;
+    case 'horns': if(L.hh) L.hh.o.forEach(o=>o.frequency.setTargetAtTime(N(HORN[i]),t,.12)); break;
+    case 'drums': if(first){ [taiko,kakko,shoko][i](t,1,L.out); if(i===0) shake=Math.max(shake,9); } break;
+    case 'bowls': if(first) bowl(t,N(BOWL[i]),.38,L.out); break;
+  } }
+function playEnd(L){ if(!ac||!L.playing) return; const t=ac.currentTime; L.playing=false; L.man=t+6;
+  if(L.id==='hichi'){ L.env.gain.setTargetAtTime(0,t,.12); L.fenv.gain.setTargetAtTime(0,t,.12); }
+  if(L.id==='sho'){ shoRelease(L,t); L.man=t+3; }
+  if(L.id==='horns'&&L.hh){ L.hh.g.gain.setTargetAtTime(0,t,.3); L.hh.o.forEach(x=>x.stop(t+2.5)); L.hh=null; }
+  if(L.id==='drums'||L.id==='bowls') L.man=t+4; }
+const xfrac=x=>((x/W*6)%1+1)%1;
 
 let lastStrike=-9, pendTutti=-9;
 function strike(x,y){ if(!ac) return; const now=ac.currentTime;
@@ -180,8 +215,8 @@ const glow=(s,x,y,r,a)=>{ if(a<=0||r<=0) return; ctx.globalAlpha=Math.min(1,a); 
 const ember=(x,y,sp)=>{ const a=Math.random()*6.283; embers.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-40,life:rnd(.8,2.2),max:2.2,s:rnd(3,9)}); };
 const lvlY=l=>H*(.84-.62*l), yLvl=y=>Math.max(0,Math.min(1,(.84-y/H)/.62)), colAt=x=>Math.max(0,Math.min(5,Math.floor(x/W*6)));
 
-const HINTS=[['grab','Pinch thumb and finger on a pillar of light, then lift it'],['more','Lift a second pillar. Each one is a section of the orchestra'],['chop','Open your hand and chop the air for the great drum'],['tutti','Chop with both hands at once']];
-const MHINTS={grab:'Drag a pillar of light upward',more:'Lift a second pillar. Each one is a section of the orchestra',chop:'Double-click, or press space, for the great drum',tutti:'Press space twice, fast'};
+const HINTS=[['grab','MIX hand: pinch a pillar of light and lift it to bring that section in'],['play','PLAY hand: pinch a pillar and move up and down. The notes are yours now'],['chop','Open your hand and chop the air for the great drum'],['tutti','Chop with both hands at once']];
+const MHINTS={grab:'Drag a pillar of light upward to bring that section in',play:'Hold Shift and drag on a pillar. The notes are yours now',chop:'Double-click, or press space, for the great drum',tutti:'Press space twice, fast'};
 let hintI=0; function showHint(){ const h=HINTS[hintI]; $('hint').textContent=h?(camOn?h[1]:MHINTS[h[0]]):''; }
 function hintDone(k){ if(HINTS[hintI]&&HINTS[hintI][0]===k){ hintI++; showHint(); } }
 
@@ -191,7 +226,7 @@ function track(dt){
   if(!landmarker||vid.readyState<2) return;
   let res; try{ res=landmarker.detectForVideo(vid,performance.now()); }catch(e){ return; }
   const seen=new Set();
-  (res.landmarks||[]).forEach(lm=>{
+  (res.landmarks||[]).forEach((lm,hi)=>{
     const pts=lm.map(p=>({x:vbox.ox+(1-p.x)*vbox.dw,y:vbox.oy+p.y*vbox.dh}));
     const px=(pts[0].x+pts[5].x+pts[9].x+pts[13].x+pts[17].x)/5, py=(pts[0].y+pts[5].y+pts[9].y+pts[13].y+pts[17].y)/5;
     let T=null,bd=W*.3; tracked.forEach(h=>{ if(seen.has(h)) return; const d=Math.hypot(h.x-px,h.y-py); if(d<bd){bd=d;T=h;} });
@@ -199,12 +234,15 @@ function track(dt){
     seen.add(T); T.vy=T.vy*.5+((py-T.y)/H/Math.max(dt,.008))*.5; T.x=px; T.y=py; T.pts=pts; T.miss=0;
     const size=Math.hypot(pts[0].x-pts[9].x,pts[0].y-pts[9].y)||1, pd=Math.hypot(pts[4].x-pts[8].x,pts[4].y-pts[8].y)/size;
     const was=T.pinch; T.pinch=was?pd<.5:pd<.32; T.px=(pts[4].x+pts[8].x)/2; T.py=(pts[4].y+pts[8].y)/2;
-    if(T.pinch&&!was){ T.col=colAt(T.px); hintDone(LAYERS.some((L,i)=>i!==T.col&&L.level>.15)?'more':'grab'); if(hintI===1&&HINTS[1]) {} }
+    // raw webcam frames are not mirrored, so MediaPipe's "Left" is your real right hand
+    const hd=res.handedness&&res.handedness[hi]&&res.handedness[hi][0]; T.role=(((hd?hd.categoryName:'Left')==='Left')!==swapHands)?'play':'mix';
+    if(T.pinch&&!was){ T.col=colAt(T.px); if(T.role==='play'){ T.pl=LAYERS[T.col]; playStart(T.pl,yLvl(T.py),xfrac(T.px)); hintDone('play'); } else hintDone('grab'); }
+    if(!T.pinch&&T.pl){ playEnd(T.pl); T.pl=null; }
     if(!T.pinch) T.col=-1;
-    if(T.pinch){ const L=LAYERS[T.col]; L.level=yLvl(T.py); L.grab=1; }
+    if(T.pinch){ if(T.pl) playMove(T.pl,yLvl(T.py),xfrac(T.px)); else { const L=LAYERS[T.col]; L.level=yLvl(T.py); L.grab=1; } }
     else if(T.vy>1.9&&clock-T.chopT>.42){ T.chopT=clock; strike(px,py); }
   });
-  for(let i=tracked.length-1;i>=0;i--){ const h=tracked[i]; if(!seen.has(h)&&(h.miss=(h.miss||0)+1)>6) tracked.splice(i,1); }
+  for(let i=tracked.length-1;i>=0;i--){ const h=tracked[i]; if(!seen.has(h)&&(h.miss=(h.miss||0)+1)>6){ if(h.pl) playEnd(h.pl); tracked.splice(i,1); } }
 }
 
 function frame(now){
@@ -241,6 +279,8 @@ function frame(now){
     const g=ctx.createLinearGradient(0,H,0,y-40); g.addColorStop(0,`rgba(${col},${.1+.5*L.cur})`); g.addColorStop(1,`rgba(${col},0)`);
     ctx.globalAlpha=1; ctx.fillStyle=g; const w=W/6*(.1+.34*L.cur); ctx.fillRect(x-w/2,y-40,w,H-y+40);
     glow(L.sp,x,y,18+46*L.cur+30*L.grab,.45+.55*L.cur+L.grab); if(L.grab>.05){ ctx.globalAlpha=L.grab; ctx.strokeStyle=`rgb(${col})`; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(x,y,30+8*Math.sin(clock*9),0,6.283); ctx.stroke(); }
+    if(L.playing){ const ns=STEPS[L.id]; for(let q=0;q<ns;q++){ const ty=lvlY(q/(ns-1)), on=q===L.pi; ctx.globalAlpha=on?1:.45; ctx.fillStyle=on?'#fff':`rgb(${col})`; ctx.fillRect(x-(on?26:12),ty-1,on?52:24,on?3:1.5); }
+      glow(WHITE,x,lvlY(L.ph),34,1); }
     ctx.globalAlpha=.5+.5*L.cur; ctx.fillStyle=`rgb(${col})`; ctx.font=`${Math.round(Math.min(34,W/6*.26))}px "Hiragino Mincho ProN","Songti SC","Kailasa",serif`; ctx.fillText(L.jp,x,H-44);
     ctx.globalAlpha=.45+.4*L.cur; ctx.fillStyle='#f6e7c8'; ctx.font='11px -apple-system,"Segoe UI",sans-serif'; ctx.fillText(L.name,x,H-22);
     if(L.cur>.05&&Math.random()<L.cur*.5) embers.push({x:x+rnd(-w,w)*.5,y:H-rnd(0,80),vx:rnd(-12,12),vy:-rnd(30,110),life:rnd(1.5,3.5),max:3.5,s:rnd(2,6),sp:L.sp}); });
@@ -256,6 +296,7 @@ function frame(now){
   tracked.forEach(h=>{ if(!h.pts) return; ctx.globalAlpha=.75; ctx.strokeStyle=h.pinch?'#fff3d6':'#ffb45a'; ctx.lineWidth=h.pinch?3:2; ctx.lineCap='round'; ctx.beginPath();
     BONES.forEach(([a,b])=>{ ctx.moveTo(h.pts[a].x,h.pts[a].y); ctx.lineTo(h.pts[b].x,h.pts[b].y); }); ctx.stroke();
     [4,8,12,16,20].forEach(i=>glow(GOLD,h.pts[i].x,h.pts[i].y,13,.9)); if(h.pinch) glow(WHITE,h.px,h.py,46,1);
+    ctx.globalAlpha=.9; ctx.fillStyle=h.role==='play'?'#fff3d6':'#ffb45a'; ctx.font='600 12px -apple-system,"Segoe UI",sans-serif'; ctx.fillText(h.role==='play'?'PLAY':'MIX',h.pts[0].x,h.pts[0].y+26);
     if(Math.random()<.6) embers.push({x:h.pts[8].x,y:h.pts[8].y,vx:rnd(-20,20),vy:rnd(-50,-10),life:.8,max:.8,s:5}); });
   if(mouse.down) glow(WHITE,mouse.x,mouse.y,40,1);
   ctx.restore();
@@ -264,15 +305,18 @@ function frame(now){
 // ───────────────────────── mouse and keys (also the fallback when there is no camera) ─────────────────────────
 const mouse={down:false,x:0,y:0,col:0};
 cv.addEventListener('pointerdown',e=>{ if(!started) return; mouse.down=true; mouse.x=e.clientX; mouse.y=e.clientY; mouse.col=colAt(e.clientX); cv.setPointerCapture(e.pointerId);
-  hintDone(LAYERS.some((L,i)=>i!==mouse.col&&L.level>.15)?'more':'grab'); setM(); });
+  mouse.pl=e.shiftKey?LAYERS[mouse.col]:null; if(mouse.pl){ playStart(mouse.pl,yLvl(mouse.y),xfrac(mouse.x)); hintDone('play'); } else hintDone('grab'); setM(); });
 cv.addEventListener('pointermove',e=>{ if(!mouse.down) return; mouse.x=e.clientX; mouse.y=e.clientY; setM(); });
-const setM=()=>{ const L=LAYERS[mouse.col]; L.level=yLvl(mouse.y); L.grab=1; };
-addEventListener('pointerup',()=>mouse.down=false);
+const setM=()=>{ if(mouse.pl){ playMove(mouse.pl,yLvl(mouse.y),xfrac(mouse.x)); return; } const L=LAYERS[mouse.col]; L.level=yLvl(mouse.y); L.grab=1; };
+addEventListener('pointerup',()=>{ mouse.down=false; if(mouse.pl){ playEnd(mouse.pl); mouse.pl=null; } });
 cv.addEventListener('dblclick',e=>{ if(started) strike(e.clientX,e.clientY); });
 addEventListener('keydown',e=>{ if(!started||e.repeat) return;
   if(e.code==='Space'){ e.preventDefault(); strike(W/2,H*.42); }
   const k=+e.key; if(k>=1&&k<=6){ const L=LAYERS[k-1]; L.level=L.level>.1?0:.7; L.grab=1; } });
 $('clear').onclick=()=>LAYERS.forEach(L=>L.level=0);
+const setAuto=v=>{ auto=v; $('auto').textContent='Auto melody: '+(auto?'on':'off'); };
+$('auto').onclick=()=>setAuto(!auto); $('swap').onclick=()=>swapHands=!swapHands;
+addEventListener('keydown',e=>{ if(!started||e.repeat) return; if(e.code==='KeyA') setAuto(!auto); if(e.code==='KeyX') swapHands=!swapHands; });
 
 // record the canvas and the sound to a video file
 let rec=null,chunks=[];
