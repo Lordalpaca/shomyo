@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>SHŌMYŌ — conduct the temple</title>
+<meta name="description" content="Conduct a temple orchestra with your bare hands: throat-singing monks, long horns, shō, hichiriki, drums and bowls, all synthesised live in your browser.">
+<meta property="og:title" content="SHŌMYŌ 声明 — conduct the temple">
+<meta property="og:description" content="Conduct a temple orchestra with your bare hands. Every sound is synthesised live in your browser.">
+<style>
+  html,body{margin:0;height:100%;background:#070304;overflow:hidden;color:#f6e7c8;user-select:none;-webkit-user-select:none;
+    font-family:"Hiragino Mincho ProN","Songti SC","Iowan Old Style",Georgia,serif}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+  video{display:none}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+    background:radial-gradient(ellipse at 50% 40%,rgba(90,30,10,.55),rgba(7,3,4,.96) 70%);transition:opacity .9s;z-index:5}
+  #start.gone{opacity:0;pointer-events:none}
+  #start .jp{font-size:clamp(70px,13vw,150px);line-height:1;color:#ffcf7a;text-shadow:0 0 50px rgba(255,150,40,.7),0 0 140px rgba(255,90,20,.5)}
+  #start h1{margin:10px 0 0;font-size:22px;font-weight:400;letter-spacing:.6em;margin-right:-.6em}
+  #start p{max-width:520px;margin:22px 24px 0;color:#c9b79a;font-size:16px;line-height:1.7;font-family:-apple-system,"Segoe UI",sans-serif}
+  .btns{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap;justify-content:center}
+  button{font:15px -apple-system,"Segoe UI",sans-serif;letter-spacing:.08em;padding:13px 24px;border-radius:999px;cursor:pointer;
+    color:#f6e7c8;background:rgba(255,190,90,.08);border:1px solid rgba(255,200,120,.45)}
+  button.main{background:linear-gradient(180deg,#ffcf7a,#e08a2c);color:#2a1004;border-color:transparent;font-weight:600}
+  button:hover{filter:brightness(1.15)}
+  #status{margin-top:16px;min-height:20px;font:13px -apple-system,"Segoe UI",sans-serif;color:#b59c78}
+  #bar{position:fixed;top:14px;right:14px;display:flex;gap:10px;z-index:3;opacity:0;transition:opacity .6s}
+  #bar.on{opacity:1}
+  #bar button{padding:8px 16px;font-size:13px}
+  #rec.live{background:#c8281e;border-color:#ff8a7a;color:#fff}
+  #hint{position:fixed;left:0;right:0;top:16px;text-align:center;font:13px -apple-system,"Segoe UI",sans-serif;letter-spacing:.06em;
+    color:rgba(246,231,200,.7);pointer-events:none;z-index:2;opacity:0;transition:opacity .6s;padding:0 150px}
+  #hint.on{opacity:1}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<video id="vid" playsinline muted></video>
+<div id="hint"></div>
+<div id="bar"><button id="rec">● Record</button><button id="clear">Silence</button></div>
+
+<div id="start">
+  <div class="jp">声明</div>
+  <h1>SHŌMYŌ</h1>
+  <p>A temple orchestra waits in the dark: throat-singing monks, long horns, the shō, the hichiriki, the great drum, the bowls. Every sound is synthesised live. You conduct it with your bare hands.</p>
+  <div class="btns">
+    <button class="main" id="goCam">Begin with my hands</button>
+    <button id="goMouse">Begin with mouse</button>
+  </div>
+  <div id="status">Camera video stays on this computer. Headphones recommended.</div>
+</div>
+
+<script>
+// ───────────────────────── the orchestra (pure synthesis, gagaku pitch A = 430 Hz) ─────────────────────────
+const N=s=>430*Math.pow(2,s/12);
+const LAYERS=[
+  {id:'monks',jp:'声明',name:'MONKS',c:[255,150,40],max:.2},
+  {id:'horns',jp:'དུང་ཆེན',name:'LONG HORNS',c:[255,70,50],max:.5},
+  {id:'sho',jp:'笙',name:'SHŌ',c:[150,255,210],max:1},
+  {id:'hichi',jp:'篳篥',name:'HICHIRIKI',c:[255,228,150],max:.17},
+  {id:'drums',jp:'太鼓',name:'DRUMS',c:[255,105,60],max:.9},
+  {id:'bowls',jp:'鈴',name:'BOWLS',c:[150,170,255],max:.85}
+];
+LAYERS.forEach(L=>{L.level=0;L.cur=0;L.next=0;L.grab=0;});
+let ac=null,bus,comp,an,recDest,noiseBuf,strikeBus,spec=new Uint8Array(512);
+const rnd=(a,b)=>a+Math.random()*(b-a), pick=a=>a[Math.floor(Math.random()*a.length)];
+
+function audioInit(){
+  if(ac){ ac.resume(); return; }
+  ac=new (window.AudioContext||window.webkitAudioContext)();
+  bus=ac.createGain(); comp=ac.createDynamicsCompressor(); comp.threshold.value=-16; comp.ratio.value=5;
+  const master=ac.createGain(); master.gain.value=.9;
+  // a big stone hall, generated: decaying noise that gets darker as it dies
+  const len=ac.sampleRate*5.5, ir=ac.createBuffer(2,len,ac.sampleRate);
+  for(let ch=0;ch<2;ch++){ const d=ir.getChannelData(ch); let y=0; for(let i=0;i<len;i++){ const a=.2+.72*(i/len); y=y*a+(Math.random()*2-1)*(1-a); d[i]=y*Math.pow(1-i/len,2.4)*3; } }
+  const conv=ac.createConvolver(); conv.buffer=ir; const wet=ac.createGain(); wet.gain.value=.6;
+  bus.connect(master); bus.connect(conv); conv.connect(wet); wet.connect(master); master.connect(comp); comp.connect(ac.destination);
+  an=ac.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=.82; comp.connect(an);
+  recDest=ac.createMediaStreamDestination(); comp.connect(recDest);
+  noiseBuf=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate); const nd=noiseBuf.getChannelData(0); for(let i=0;i<nd.length;i++) nd[i]=Math.random()*2-1;
+  strikeBus=ac.createGain(); strikeBus.gain.value=.9; strikeBus.connect(bus);
+  LAYERS.forEach(L=>{ L.out=ac.createGain(); L.out.gain.value=0; L.out.connect(bus); L.next=ac.currentTime+.2; });
+  buildMonks(LAYERS[0]); buildHichiriki(LAYERS[3]);
+  setInterval(tick,60);
+}
+const osc=(type,f,dest,det)=>{ const o=ac.createOscillator(); o.type=type; o.frequency.value=f; if(det) o.detune.value=det; o.connect(dest); o.start(); return o; };
+const gain=(v,dest)=>{ const g=ac.createGain(); g.gain.value=v; if(dest) g.connect(dest); return g; };
+const filt=(type,f,q,dest)=>{ const b=ac.createBiquadFilter(); b.type=type; b.frequency.value=f; b.Q.value=q; if(dest) b.connect(dest); return b; };
+function noise(t,dur,type,f,q,peak,dest,f1){ const s=ac.createBufferSource(); s.buffer=noiseBuf; s.loop=true; const b=filt(type,f,q), g=gain(0,dest);
+  if(f1) b.frequency.exponentialRampToValueAtTime(f1,t+dur);
+  g.gain.setValueAtTime(peak,t); g.gain.exponentialRampToValueAtTime(.0005,t+dur); s.connect(b); b.connect(g); s.start(t,Math.random()); s.stop(t+dur+.05); }
+
+// Monks: six sawtooth "throats" on a low B, shaped by vowel formants, with an overtone whistle on top
+const VOW=[[430,800,2600],[640,1100,2500],[320,680,2400],[500,1500,2500]];
+function buildMonks(L){
+  const src=gain(1); L.pre=gain(1,L.out);
+  [[-34,0,1],[-34,9,1],[-34,-11,1],[-34,5,.8],[-27,-4,.3],[-22,3,.22]].forEach(([s,c,g],i)=>{ const v=gain(g,src), o=osc('sawtooth',N(s),v,c);
+    const lg=gain(7); osc('sine',.06+.045*i,lg); lg.connect(o.detune); });
+  L.F=[0,1,2].map(i=>{ const fg=gain([1,.65,.3][i],L.pre), f=filt('bandpass',VOW[0][i],[7,9,11][i],fg); src.connect(f); return f; });
+  src.connect(filt('lowpass',210,.7,gain(.55,L.pre)));
+  L.wg=gain(0,L.pre); L.wh=filt('bandpass',N(-34)*8,30,L.wg); src.connect(L.wh);
+}
+function tickMonks(L,t){ const v=pick(VOW); L.F.forEach((f,i)=>f.frequency.setTargetAtTime(v[i],t,.14));
+  L.pre.gain.setTargetAtTime(.5,t,.04); L.pre.gain.setTargetAtTime(1,t+.13,.16);
+  if(Math.random()<.5) L.wh.frequency.setTargetAtTime(N(-34)*(6+Math.floor(Math.random()*7)),t,.35);
+  L.wg.gain.setTargetAtTime(Math.max(0,L.cur-.5)*5,t,.6);
+  L.next=t+rnd(.9,1.7)*(Math.random()<.2?2:1); }
+
+// Dungchen: two long horns that slide up into the note and blare
+function horn(t,power,dest){ const dur=rnd(4.5,6.5), f=N(-31), lp=filt('lowpass',150,1.2), g=gain(0,dest); lp.connect(g);
+  [-9,8].forEach(d=>{ const o=ac.createOscillator(); o.type='sawtooth'; o.detune.value=d; o.frequency.setValueAtTime(f*.82,t); o.frequency.exponentialRampToValueAtTime(f,t+.55); o.connect(lp); o.start(t); o.stop(t+dur+.2); });
+  lp.frequency.setValueAtTime(150,t); lp.frequency.exponentialRampToValueAtTime(500+1700*power,t+1.3); lp.frequency.exponentialRampToValueAtTime(240,t+dur);
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.5,t+.6); g.gain.setValueAtTime(.5,t+dur-1.2); g.gain.linearRampToValueAtTime(0,t+dur);
+  const tr=ac.createOscillator(), tg=gain(.08); tr.frequency.value=27; tr.connect(tg); tg.connect(g.gain); tr.start(t); tr.stop(t+dur+.2); }
+function tickHorns(L,t){ horn(t,L.cur,L.out); L.next=t+rnd(9,13)-5*L.cur; }
+
+// Shō: the mouth organ's cluster chords (aitake), breathing in and out
+const AITAKE=[[7,12,14,19,21],[5,7,12,14,19,21],[2,5,7,12,14,21],[0,5,7,12,14,21]];
+function tickSho(L,t){ const dur=rnd(6,8.5); pick(AITAKE).forEach(s=>{ const f=N(s), lp=filt('lowpass',3600,.5), g=gain(0,L.out); lp.connect(g);
+    const a=ac.createOscillator(); a.type='triangle'; a.frequency.value=f; a.connect(lp); const b=ac.createOscillator(), bg=gain(.13,lp); b.type='square'; b.frequency.value=f*1.002; b.connect(bg);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.045,t+2.4); g.gain.setValueAtTime(.045,t+dur); g.gain.linearRampToValueAtTime(0,t+dur+2.6);
+    [a,b].forEach(o=>{o.start(t);o.stop(t+dur+2.8);}); });
+  L.next=t+dur; }
+
+// Hichiriki: a nasal reed that bends up into every note, with the ryūteki flute shadowing it an octave above
+const SCALE=[0,2,5,7,9,12];
+function buildHichiriki(L){ L.env=gain(0,L.out); const bp=filt('bandpass',1500,1.4,gain(1,L.env)), lp=filt('lowpass',2800,.7,gain(.35,L.env));
+  L.o=[osc('sawtooth',N(7),bp),osc('square',N(7),gain(.4,bp))]; L.o[0].connect(lp);
+  L.fenv=gain(0,L.out); L.o.push(osc('sine',N(19),L.fenv)); L.mul=[1,1,2];
+  L.vib=gain(0); osc('sine',5.6,L.vib); L.o.forEach(o=>L.vib.connect(o.detune)); L.idx=3; }
+function tickHichiriki(L,t){ L.idx=Math.max(0,Math.min(5,L.idx+pick([-2,-1,-1,1,1,2]))); const f=N(SCALE[L.idx]), dur=rnd(2.2,5);
+  L.o.forEach((o,i)=>{ o.frequency.setValueAtTime(f*L.mul[i]*.89,t); o.frequency.setTargetAtTime(f*L.mul[i],t,.24); });
+  L.vib.gain.setValueAtTime(0,t); L.vib.gain.linearRampToValueAtTime(38,t+dur);
+  L.env.gain.setTargetAtTime(1,t,.3); L.fenv.gain.setTargetAtTime(Math.max(0,L.cur-.45)*.9,t,.5);
+  if(Math.random()<.55){ L.env.gain.setTargetAtTime(0,t+dur-.5,.22); L.fenv.gain.setTargetAtTime(0,t+dur-.5,.22); L.next=t+dur+rnd(.6,2.5); } else L.next=t+dur; }
+
+// Percussion
+function taiko(t,v,dest){ const o=ac.createOscillator(), g=gain(0,dest); o.frequency.setValueAtTime(115,t); o.frequency.exponentialRampToValueAtTime(46,t+.28); o.connect(g);
+  g.gain.setValueAtTime(v,t); g.gain.exponentialRampToValueAtTime(.0005,t+1.6); o.start(t); o.stop(t+1.7); noise(t,.18,'lowpass',380,.6,v*.7,dest); }
+function kakko(t,v,dest){ const o=ac.createOscillator(), g=gain(0,dest); o.type='triangle'; o.frequency.setValueAtTime(380,t); o.frequency.exponentialRampToValueAtTime(260,t+.07); o.connect(g);
+  g.gain.setValueAtTime(v*.5,t); g.gain.exponentialRampToValueAtTime(.0005,t+.12); o.start(t); o.stop(t+.15); noise(t,.05,'bandpass',1100,1.5,v*.35,dest); }
+function shoko(t,v,dest){ [2090,3160,4410,5870].forEach((f,i)=>{ const o=ac.createOscillator(), g=gain(0,dest); o.type='square'; o.frequency.value=f; o.connect(g);
+  g.gain.setValueAtTime(v*.05/(i+1),t); g.gain.exponentialRampToValueAtTime(.0003,t+.5); o.start(t); o.stop(t+.55); }); }
+function rolmo(t,v,dest){ noise(t,2.6,'bandpass',5200,.8,v*.35,dest,3200); noise(t,.4,'highpass',7000,.5,v*.3,dest); }
+function tickDrums(L,t){ const c=L.cur, o=L.out; L.bar=(L.bar||0)+1;
+  shoko(t,.8,o); shoko(t+.2,.5,o); shoko(t+4,.6,o);
+  let tt=t+2, iv=.52; for(let i=0;i<14;i++){ kakko(tt,.45+i*.04,o); tt+=iv; iv*=.84; } kakko(t+6,.7,o); kakko(t+7,.8,o);
+  if(c>.25) taiko(t+5,.55,o); if(c>.5&&L.bar%2===0) taiko(t,.9,o);
+  if(c>.7){ rolmo(t,.8,o); for(let i=0;i<8;i++) taiko(t+i,.16,o); }
+  L.next=t+8; }
+
+// Singing bowls: inharmonic partials, each doubled a hair apart so they beat against each other
+function bowl(t,f,v,dest){ [1,2.71,5.15,8.3].forEach((p,i)=>[0,.6+i*.3].forEach(d=>{ const o=ac.createOscillator(), g=gain(0,dest); o.frequency.value=f*p+d; o.connect(g);
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(v*[.5,.25,.12,.05][i],t+.012); g.gain.exponentialRampToValueAtTime(.0003,t+10/(1+i*.8)); o.start(t); o.stop(t+10.2); })); }
+function tickBowls(L,t){ bowl(t,N(pick([-19,-12,-7,-5,0])),.3,L.out);
+  if(L.cur>.6&&Math.random()<.5){ const g=L.out; [2470,2489].forEach(f=>{ const o=ac.createOscillator(), e=gain(0,g); o.frequency.value=f; o.connect(e); e.gain.setValueAtTime(.05,t+1.5); e.gain.exponentialRampToValueAtTime(.0003,t+5); o.start(t+1.5); o.stop(t+5.1); }); }
+  L.next=t+rnd(8,11)-6*L.cur; }
+
+const TICK={monks:tickMonks,horns:tickHorns,sho:tickSho,hichi:tickHichiriki,drums:tickDrums,bowls:tickBowls};
+function tick(){ const now=ac.currentTime;
+  LAYERS.forEach(L=>{ if(L.cur<.04){ L.next=Math.max(L.next,now+.15); if(L.id==='hichi'){ L.env.gain.setTargetAtTime(0,now,.2); L.fenv.gain.setTargetAtTime(0,now,.2); } return; }
+    let guard=0; while(L.next<now+.25&&guard++<4) TICK[L.id](L,Math.max(L.next,now+.02)); }); }
+
+let lastStrike=-9, pendTutti=-9;
+function strike(x,y){ if(!ac) return; const now=ac.currentTime;
+  if(now-lastStrike<.3&&now-pendTutti>2){ pendTutti=now; horn(now,1,strikeBus); rolmo(now,1,strikeBus); bowl(now,N(-19),.4,strikeBus); fx.push({t:0,x:W/2,y:H*.42,big:2}); shake=26; hintDone('tutti'); }
+  else { taiko(now,1,strikeBus); fx.push({t:0,x,y,big:1}); shake=Math.max(shake,14); hintDone('chop'); }
+  lastStrike=now; for(let i=0;i<40;i++) ember(x,y,rnd(80,420)); }
+
+// ───────────────────────── stage ─────────────────────────
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d'), vid=document.getElementById('vid'), $=id=>document.getElementById(id);
+let W=0,H=0,dpr=1,clock=0,last=0,shake=0,rot=0,energy=0,started=false,camOn=false;
+const fx=[], embers=[], tracked=[];
+function resize(){ dpr=Math.min(devicePixelRatio||1,2); if(innerWidth!==W||innerHeight!==H){ W=innerWidth; H=innerHeight; cv.width=W*dpr; cv.height=H*dpr; } ctx.setTransform(dpr,0,0,dpr,0,0); }
+function spr(r,g,b){ const c=document.createElement('canvas'); c.width=c.height=128; const x=c.getContext('2d'), gr=x.createRadialGradient(64,64,0,64,64,64);
+  gr.addColorStop(0,'rgba(255,255,255,1)'); gr.addColorStop(.12,`rgba(${r},${g},${b},.9)`); gr.addColorStop(.4,`rgba(${r},${g},${b},.22)`); gr.addColorStop(1,`rgba(${r},${g},${b},0)`);
+  x.fillStyle=gr; x.fillRect(0,0,128,128); return c; }
+LAYERS.forEach(L=>L.sp=spr(...L.c)); const GOLD=spr(255,190,90), WHITE=spr(255,240,210);
+const glow=(s,x,y,r,a)=>{ if(a<=0||r<=0) return; ctx.globalAlpha=Math.min(1,a); ctx.drawImage(s,x-r,y-r,r*2,r*2); };
+const ember=(x,y,sp)=>{ const a=Math.random()*6.283; embers.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-40,life:rnd(.8,2.2),max:2.2,s:rnd(3,9)}); };
+const lvlY=l=>H*(.84-.62*l), yLvl=y=>Math.max(0,Math.min(1,(.84-y/H)/.62)), colAt=x=>Math.max(0,Math.min(5,Math.floor(x/W*6)));
+
+const HINTS=[['grab','Pinch thumb and finger on a pillar of light, then lift it'],['more','Lift a second pillar. Each one is a section of the orchestra'],['chop','Open your hand and chop the air for the great drum'],['tutti','Chop with both hands at once']];
+const MHINTS={grab:'Drag a pillar of light upward',more:'Lift a second pillar. Each one is a section of the orchestra',chop:'Double-click, or press space, for the great drum',tutti:'Press space twice, fast'};
+let hintI=0; function showHint(){ const h=HINTS[hintI]; $('hint').textContent=h?(camOn?h[1]:MHINTS[h[0]]):''; }
+function hintDone(k){ if(HINTS[hintI]&&HINTS[hintI][0]===k){ hintI++; showHint(); } }
+
+const BONES=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+let landmarker=null, vbox={ox:0,oy:0,dw:1,dh:1};
+function track(dt){
+  if(!landmarker||vid.readyState<2) return;
+  let res; try{ res=landmarker.detectForVideo(vid,performance.now()); }catch(e){ return; }
+  const seen=new Set();
+  (res.landmarks||[]).forEach(lm=>{
+    const pts=lm.map(p=>({x:vbox.ox+(1-p.x)*vbox.dw,y:vbox.oy+p.y*vbox.dh}));
+    const px=(pts[0].x+pts[5].x+pts[9].x+pts[13].x+pts[17].x)/5, py=(pts[0].y+pts[5].y+pts[9].y+pts[13].y+pts[17].y)/5;
+    let T=null,bd=W*.3; tracked.forEach(h=>{ if(seen.has(h)) return; const d=Math.hypot(h.x-px,h.y-py); if(d<bd){bd=d;T=h;} });
+    if(!T){ T={x:px,y:py,vy:0,pinch:false,col:-1,chopT:-9}; tracked.push(T); }
+    seen.add(T); T.vy=T.vy*.5+((py-T.y)/H/Math.max(dt,.008))*.5; T.x=px; T.y=py; T.pts=pts; T.miss=0;
+    const size=Math.hypot(pts[0].x-pts[9].x,pts[0].y-pts[9].y)||1, pd=Math.hypot(pts[4].x-pts[8].x,pts[4].y-pts[8].y)/size;
+    const was=T.pinch; T.pinch=was?pd<.5:pd<.32; T.px=(pts[4].x+pts[8].x)/2; T.py=(pts[4].y+pts[8].y)/2;
+    if(T.pinch&&!was){ T.col=colAt(T.px); hintDone(LAYERS.some((L,i)=>i!==T.col&&L.level>.15)?'more':'grab'); if(hintI===1&&HINTS[1]) {} }
+    if(!T.pinch) T.col=-1;
+    if(T.pinch){ const L=LAYERS[T.col]; L.level=yLvl(T.py); L.grab=1; }
+    else if(T.vy>1.9&&clock-T.chopT>.42){ T.chopT=clock; strike(px,py); }
+  });
+  for(let i=tracked.length-1;i>=0;i--){ const h=tracked[i]; if(!seen.has(h)&&(h.miss=(h.miss||0)+1)>6) tracked.splice(i,1); }
+}
+
+function frame(now){
+  requestAnimationFrame(frame); resize(); const dt=Math.min(.05,(now-last)/1000||.016); last=now; clock+=dt;
+  if(started) track(dt);
+  let total=0; LAYERS.forEach(L=>{ L.cur+=(L.level-L.cur)*Math.min(1,dt*3); L.grab=Math.max(0,L.grab-dt*3); total+=L.cur;
+    if(ac) L.out.gain.setTargetAtTime(Math.pow(L.cur,1.5)*L.max,ac.currentTime,.06); });
+  if(an){ an.getByteFrequencyData(spec); let s=0; for(let i=2;i<120;i++) s+=spec[i]; energy+=(s/118/255-energy)*.25; }
+  shake*=Math.exp(-dt*7); rot+=dt*(.04+energy*.5);
+  ctx.save(); ctx.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);
+
+  // hall
+  ctx.globalCompositeOperation='source-over'; ctx.globalAlpha=1; ctx.fillStyle='#070304'; ctx.fillRect(-30,-30,W+60,H+60);
+  if(camOn&&vid.readyState>=2){ const s=Math.max(W/vid.videoWidth,H/vid.videoHeight); vbox={dw:vid.videoWidth*s,dh:vid.videoHeight*s}; vbox.ox=(W-vbox.dw)/2; vbox.oy=(H-vbox.dh)/2;
+    ctx.save(); ctx.globalAlpha=.42; ctx.translate(W,0); ctx.scale(-1,1); ctx.drawImage(vid,vbox.ox,vbox.oy,vbox.dw,vbox.dh); ctx.restore();
+    ctx.globalCompositeOperation='multiply'; ctx.globalAlpha=1; ctx.fillStyle='#b0602a'; ctx.fillRect(0,0,W,H); ctx.globalCompositeOperation='source-over'; }
+  const bg=ctx.createRadialGradient(W/2,H*.42,0,W/2,H*.42,Math.max(W,H)*.75); bg.addColorStop(0,`rgba(120,40,10,${.25+energy*.5})`); bg.addColorStop(.5,'rgba(40,10,6,.35)'); bg.addColorStop(1,'rgba(4,1,2,.92)');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+  // mandala: one ring per section, shaped by the live spectrum
+  ctx.globalCompositeOperation='lighter'; const cx=W/2, cy=H*.42, R=Math.min(W,H)*.36;
+  glow(GOLD,cx,cy,R*(.5+energy*2.2),.25+energy); glow(WHITE,cx,cy,R*(.08+energy*.5),.5+energy);
+  for(let q=0;q<2;q++){ ctx.save(); ctx.translate(cx,cy); ctx.rotate(rot*(q?-.5:.5)+q*.785); ctx.globalAlpha=.1+total*.04; ctx.strokeStyle='#ffb45a'; ctx.lineWidth=1; const s=R*1.18; ctx.strokeRect(-s,-s,s*2,s*2); ctx.restore(); }
+  LAYERS.forEach((L,k)=>{ const a=L.cur, n=[6,8,12,16,24,32][k], rk=R*(.22+.155*k), dir=k%2?-1:1, steps=n*10, b0=[2,4,24,34,8,60][k];
+    ctx.strokeStyle=`rgb(${L.c})`; ctx.globalAlpha=.07+.85*a; ctx.lineWidth=.8+2.4*a; ctx.beginPath();
+    for(let i=0;i<=steps;i++){ const th=i/steps*6.2832, m=Math.abs(((i/steps*n*2)%2)-1), sp=spec[b0+Math.floor(m*14)]/255;
+      const r=rk*(1+.09*a*Math.cos(n*th)+.32*a*sp), x=cx+Math.cos(th+rot*dir*(1+k*.15))*r, y=cy+Math.sin(th+rot*dir*(1+k*.15))*r; i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    ctx.stroke();
+    if(a>.05) for(let i=0;i<n;i++){ const th=i/n*6.2832+rot*dir*(1+k*.15); glow(L.sp,cx+Math.cos(th)*rk*(1+.09*a),cy+Math.sin(th)*rk*(1+.09*a),5+16*a,a*.8); } });
+
+  // pillars
+  ctx.textAlign='center';
+  LAYERS.forEach((L,i)=>{ const x=(i+.5)*W/6, y=lvlY(L.cur), col=`${L.c}`;
+    const g=ctx.createLinearGradient(0,H,0,y-40); g.addColorStop(0,`rgba(${col},${.1+.5*L.cur})`); g.addColorStop(1,`rgba(${col},0)`);
+    ctx.globalAlpha=1; ctx.fillStyle=g; const w=W/6*(.1+.34*L.cur); ctx.fillRect(x-w/2,y-40,w,H-y+40);
+    glow(L.sp,x,y,18+46*L.cur+30*L.grab,.45+.55*L.cur+L.grab); if(L.grab>.05){ ctx.globalAlpha=L.grab; ctx.strokeStyle=`rgb(${col})`; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(x,y,30+8*Math.sin(clock*9),0,6.283); ctx.stroke(); }
+    ctx.globalAlpha=.5+.5*L.cur; ctx.fillStyle=`rgb(${col})`; ctx.font=`${Math.round(Math.min(34,W/6*.26))}px "Hiragino Mincho ProN","Songti SC","Kailasa",serif`; ctx.fillText(L.jp,x,H-44);
+    ctx.globalAlpha=.45+.4*L.cur; ctx.fillStyle='#f6e7c8'; ctx.font='11px -apple-system,"Segoe UI",sans-serif'; ctx.fillText(L.name,x,H-22);
+    if(L.cur>.05&&Math.random()<L.cur*.5) embers.push({x:x+rnd(-w,w)*.5,y:H-rnd(0,80),vx:rnd(-12,12),vy:-rnd(30,110),life:rnd(1.5,3.5),max:3.5,s:rnd(2,6),sp:L.sp}); });
+
+  // strikes
+  for(let i=fx.length-1;i>=0;i--){ const f=fx[i]; f.t+=dt; const k=f.t/(f.big>1?1.6:.9); if(k>=1){ fx.splice(i,1); continue; }
+    ctx.globalAlpha=(1-k)*.9; ctx.strokeStyle=f.big>1?'#ffd9a0':'#ff8a50'; ctx.lineWidth=(1-k)*10*f.big; ctx.beginPath(); ctx.arc(f.x,f.y,k*Math.max(W,H)*.5*f.big,0,6.283); ctx.stroke();
+    if(k<.15){ ctx.globalAlpha=(.15-k)*2.2*f.big; ctx.fillStyle='#ffd0a0'; ctx.fillRect(0,0,W,H); } }
+  for(let i=embers.length-1;i>=0;i--){ const e=embers[i]; e.life-=dt; if(e.life<=0){ embers.splice(i,1); continue; } e.x+=e.vx*dt+Math.sin(clock*2+e.y*.02)*.3; e.y+=e.vy*dt; e.vx*=.985; e.vy=e.vy*.985-6*dt;
+    glow(e.sp||GOLD,e.x,e.y,e.s*(.6+e.life/e.max),e.life/e.max); }
+
+  // hands
+  tracked.forEach(h=>{ if(!h.pts) return; ctx.globalAlpha=.75; ctx.strokeStyle=h.pinch?'#fff3d6':'#ffb45a'; ctx.lineWidth=h.pinch?3:2; ctx.lineCap='round'; ctx.beginPath();
+    BONES.forEach(([a,b])=>{ ctx.moveTo(h.pts[a].x,h.pts[a].y); ctx.lineTo(h.pts[b].x,h.pts[b].y); }); ctx.stroke();
+    [4,8,12,16,20].forEach(i=>glow(GOLD,h.pts[i].x,h.pts[i].y,13,.9)); if(h.pinch) glow(WHITE,h.px,h.py,46,1);
+    if(Math.random()<.6) embers.push({x:h.pts[8].x,y:h.pts[8].y,vx:rnd(-20,20),vy:rnd(-50,-10),life:.8,max:.8,s:5}); });
+  if(mouse.down) glow(WHITE,mouse.x,mouse.y,40,1);
+  ctx.restore();
+}
+
+// ───────────────────────── mouse and keys (also the fallback when there is no camera) ─────────────────────────
+const mouse={down:false,x:0,y:0,col:0};
+cv.addEventListener('pointerdown',e=>{ if(!started) return; mouse.down=true; mouse.x=e.clientX; mouse.y=e.clientY; mouse.col=colAt(e.clientX); cv.setPointerCapture(e.pointerId);
+  hintDone(LAYERS.some((L,i)=>i!==mouse.col&&L.level>.15)?'more':'grab'); setM(); });
+cv.addEventListener('pointermove',e=>{ if(!mouse.down) return; mouse.x=e.clientX; mouse.y=e.clientY; setM(); });
+const setM=()=>{ const L=LAYERS[mouse.col]; L.level=yLvl(mouse.y); L.grab=1; };
+addEventListener('pointerup',()=>mouse.down=false);
+cv.addEventListener('dblclick',e=>{ if(started) strike(e.clientX,e.clientY); });
+addEventListener('keydown',e=>{ if(!started||e.repeat) return;
+  if(e.code==='Space'){ e.preventDefault(); strike(W/2,H*.42); }
+  const k=+e.key; if(k>=1&&k<=6){ const L=LAYERS[k-1]; L.level=L.level>.1?0:.7; L.grab=1; } });
+$('clear').onclick=()=>LAYERS.forEach(L=>L.level=0);
+
+// record the canvas and the sound to a video file
+let rec=null,chunks=[];
+$('rec').onclick=()=>{ const b=$('rec');
+  if(rec){ rec.stop(); return; }
+  const st=cv.captureStream(30); st.addTrack(recDest.stream.getAudioTracks()[0]);
+  const mt=['video/mp4;codecs=avc1,mp4a','video/webm;codecs=vp9,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
+  rec=new MediaRecorder(st,{mimeType:mt,videoBitsPerSecond:8e6}); chunks=[];
+  rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+  rec.onstop=()=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(chunks,{type:mt})); a.download='shomyo.'+(mt.includes('mp4')?'mp4':'webm'); a.click(); rec=null; b.textContent='● Record'; b.classList.remove('live'); };
+  rec.start(); b.textContent='■ Stop and save'; b.classList.add('live'); };
+
+async function begin(useCam){
+  audioInit(); const st=$('status');
+  if(useCam){
+    try{ st.textContent='Asking for the camera…';
+      vid.srcObject=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'},audio:false}); await vid.play(); camOn=true;
+      st.textContent='Loading hand tracking…';
+      const V='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+      const mp=await import(V+'/vision_bundle.mjs'), fs=await mp.FilesetResolver.forVisionTasks(V+'/wasm');
+      landmarker=await mp.HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:2});
+    }catch(err){ console.warn('camera/hand tracking unavailable:',err); if(!landmarker){ camOn=camOn&&false; st.textContent='Hands unavailable ('+(err.name||'error')+'). Starting with the mouse.'; await new Promise(r=>setTimeout(r,1400)); } }
+  }
+  camOn=!!landmarker; started=true; $('start').classList.add('gone'); $('bar').classList.add('on'); $('hint').classList.add('on'); showHint();
+  LAYERS[0].level=.35; bowl(ac.currentTime+.1,N(-19),.5,strikeBus);
+}
+$('goCam').onclick=()=>begin(true); $('goMouse').onclick=()=>begin(false);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
