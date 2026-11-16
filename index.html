@@ -81,6 +81,11 @@ function audioInit(){
   strikeBus=ac.createGain(); strikeBus.gain.value=.9; strikeBus.connect(bus);
   LAYERS.forEach(L=>{ L.out=ac.createGain(); L.out.gain.value=0; L.out.connect(bus); L.next=ac.currentTime+.2; });
   buildMonks(LAYERS[0]); buildHichiriki(LAYERS[3]);
+  // the real voices: Pink Trombone vocal tracts in an AudioWorklet; the filter choir above stays as the fallback
+  if(ac.audioWorklet) ac.audioWorklet.addModule('monk-worklet.js').then(()=>{ const L=LAYERS[0];
+    L.wk=new AudioWorkletNode(ac,'monks',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2],processorOptions:{voices:4}});
+    L.wk.port.postMessage({freq:N(-34)}); L.wk.connect(gain(10,L.pre)); L.legacy.gain.setTargetAtTime(0,ac.currentTime,.5);
+  }).catch(e=>console.warn('monk voices unavailable, using the fallback choir',e));
   setInterval(tick,60);
 }
 const osc=(type,f,dest,det)=>{ const o=ac.createOscillator(); o.type=type; o.frequency.value=f; if(det) o.detune.value=det; o.connect(dest); o.start(); return o; };
@@ -93,14 +98,16 @@ function noise(t,dur,type,f,q,peak,dest,f1){ const s=ac.createBufferSource(); s.
 // Monks: six sawtooth "throats" on a low B, shaped by vowel formants, with an overtone whistle on top
 const VOW=[[430,800,2600],[640,1100,2500],[320,680,2400],[500,1500,2500]];
 function buildMonks(L){
-  const src=gain(1); L.pre=gain(1,L.out);
+  const src=gain(1); L.pre=gain(1,L.out); L.legacy=gain(1,L.pre);
   [[-34,0,1],[-34,9,1],[-34,-11,1],[-34,5,.8],[-27,-4,.3],[-22,3,.22]].forEach(([s,c,g],i)=>{ const v=gain(g,src), o=osc('sawtooth',N(s),v,c);
     const lg=gain(7); osc('sine',.06+.045*i,lg); lg.connect(o.detune); (L.os=L.os||[]).push({o,s}); });
-  L.F=[0,1,2].map(i=>{ const fg=gain([1,.65,.3][i],L.pre), f=filt('bandpass',VOW[0][i],[7,9,11][i],fg); src.connect(f); return f; });
+  L.F=[0,1,2].map(i=>{ const fg=gain([1,.65,.3][i],L.legacy), f=filt('bandpass',VOW[0][i],[7,9,11][i],fg); src.connect(f); return f; });
   src.connect(filt('lowpass',210,.7,gain(.55,L.pre)));
   L.wg=gain(0,L.pre); L.wh=filt('bandpass',N(-34)*8,30,L.wg); src.connect(L.wh);
 }
-function tickMonks(L,t){ const v=pick(VOW); L.F.forEach((f,i)=>f.frequency.setTargetAtTime(v[i],t,.14));
+const MANTRA=['o','m','a','i','a','e','u','m'];   // om ma ni pad me hum
+function tickMonks(L,t){ const v=pick(VOW);
+  if(L.wk){ L.syl=((L.syl||0)+1)%MANTRA.length; L.wk.port.postMessage({shape:MANTRA[L.syl],tense:.7+.28*L.cur}); } L.F.forEach((f,i)=>f.frequency.setTargetAtTime(v[i],t,.14));
   L.pre.gain.setTargetAtTime(.5,t,.04); L.pre.gain.setTargetAtTime(1,t+.13,.16);
   if(Math.random()<.5) L.wh.frequency.setTargetAtTime(N(-34)*(6+Math.floor(Math.random()*7)),t,.35);
   L.wg.gain.setTargetAtTime(Math.max(0,L.cur-.5)*5,t,.6);
@@ -182,7 +189,9 @@ function playStart(L,h,xf){ if(!ac) return; const t=ac.currentTime; L.pi=-1; L.p
 function playMove(L,h,xf,first){ if(!ac||!L.playing) return; const t=ac.currentTime, n=STEPS[L.id], pos=h*(n-1), i=Math.round(pos), ch=i!==L.pi; L.pi=i; L.man=t+8; L.ph=h; L.grab=1;
   switch(L.id){
     case 'hichi': { const f=N(PSCALE[i]+(pos-i)*.5); L.o.forEach((o,k)=>o.frequency.setTargetAtTime(f*L.mul[k],t,first?.02:.06)); break; }
-    case 'monks': { if(ch){ L.os.forEach(v=>v.o.frequency.setTargetAtTime(N(v.s+MTR[i]),t,.22)); L.wh.frequency.setTargetAtTime(N(-34+MTR[i])*8,t,.3); }
+    case 'monks': { if(first) L.pz=-1; const z=Math.max(0,Math.min(4,Math.floor(xf*5))); if(L.wk&&z!==L.pz){ L.pz=z; L.wk.port.postMessage({shape:'uoaei'[z],tight:true}); }
+      if(ch&&L.wk) L.wk.port.postMessage({freq:N(-34+MTR[i])});
+      if(ch){ L.os.forEach(v=>v.o.frequency.setTargetAtTime(N(v.s+MTR[i]),t,.22)); L.wh.frequency.setTargetAtTime(N(-34+MTR[i])*8,t,.3); }
       const v=VOW[Math.max(0,Math.min(3,Math.floor(xf*4)))]; if(v!==L.pv){ L.pv=v; L.F.forEach((f,k)=>f.frequency.setTargetAtTime(v[k],t,.08)); L.pre.gain.setTargetAtTime(.5,t,.03); L.pre.gain.setTargetAtTime(1,t+.1,.12); } break; }
     case 'sho': if(ch){ shoRelease(L,t); L.held=shoHold(t,AITAKE[i],L.out); } break;
     case 'horns': if(L.hh) L.hh.o.forEach(o=>o.frequency.setTargetAtTime(N(HORN[i]),t,.12)); break;
